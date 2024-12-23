@@ -1,0 +1,446 @@
+---
+title: "PSTAT 100 Final Project Report"
+author: "Aliza Samad"
+date: "2024-12-01"
+output: html_document
+always_allow_html: TRUE
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Introduction
+The rapid advancement of Artificial Intelligence has influenced industries worldwide, reshaping workflows, automating processes, and boosting productivity. One sector impacted is data science, where AI’s growing role has changed job roles and compensation patterns. This research seeks to address these shifts by addressing the question: *How has the growth of AI influenced job titles and salary trends in the data science field?*\
+
+Initially, we considered a broader scope, including the question: How does experience level affect salaries in the data science field? Our hypothesis - that salaries increase with experience - is well-supported and confirmed through preliminary EDA. While this finding reinforces common assumptions, it offers limited opportunity for deeper discussions. To provide a more focused and impactful contribution, we shifted our focus to the evolving relationship between AI and data science roles.\
+
+We hypothesize that AI-specific roles have increased in demand *and* have higher average salaries than traditional data science roles. To test this hypothesis, we utilized a Kaggle data set titled “[Data Science Salaries Dataset](https://www.kaggle.com/datasets/yusufdelikkaya/datascience-salaries-2024),” which included a detailed repository of experience levels, employment types, work years, salary in USD, and more. Below is a snapshot of our cleaned data set:\
+
+```{r Data Setup, echo=FALSE, message=FALSE}
+library(tidyverse)
+library(caret)
+library(randomForest)
+library(forcats)
+
+data <- read.csv("~/Downloads/PSTAT 100/DataScience_salaries_2024.csv")
+
+# clean data & reduce high cardinality
+data <- data %>%
+  filter(company_location == "US") %>%
+  na.omit() %>%
+  mutate(across(where(is.character), as.factor))%>%
+  mutate(employee_residence = fct_lump(employee_residence, n = 50)) %>%
+  mutate(
+    job_title = case_when(
+      str_detect(job_title, regex("machine learning|ml|machine-learning|ai|mlops|robotics|science|scientist|nlp", 
+                                  ignore_case = TRUE)) ~ "Machine Learning/AI",
+      TRUE ~ "Other")) %>%
+  select(-c(salary, salary_currency, company_location))
+
+# remove outliers from data
+outliers <- boxplot.stats(data$salary_in_usd)$out
+data_no_outliers <- data %>%
+  filter(!(salary_in_usd %in% outliers))
+
+# display cleaned data
+knitr::kable(head(data_no_outliers, 10), caption = "Data Science Salaries (clean)")
+```
+
+Through EDA, we made several observations. First, we had initially attempted to create a map illustrating how `company_location` influenced `salary_in_usd`. However, there are too few observations in countries outside the US relative to the observations in which `company_location` is in the US. Thus, we decided to filter our data so the observations in our data set are focused on US companies only. Second, we noticed a very interested pattern when plotting the average salaries over time. We noticed that there was a sudden drop in average salary from 2020 to 2021, which we attributed to the Covid-19 pandemic, and then a increase jump in salary from 2022 to 2023, which we attributed to the rise in popularity of generative AI. However, despite the fact that the data science industry has taken huge leaps in the past year, we were curious as to why there is a *decrease* in average salary from 2023 to 2024. This will be looked into later on in this study. Finally, we created a word cloud diagram comparing the most common job titles associated with a lower salary (< Q1) and those associated with a higher salary (> Q3). After filtering out the word "data", we found that roles such as "analyst", "business intelligence", and even "scientist" receive lower salaries than roles such as "machine learning", or "research." Interestingly, "engineer" appeared in the lower salary range almost equally as frequent as it did in the higher salary range. Thus, using this initial analysis, we wanted to further explore the relationship between `salary_in_usd`, `job_title`, and `work_year`.\
+
+By narrowing the scope to AI’s influence on data science salaries and roles, this study aims to provide actionable insights for professionals and organizations within US companies navigating through this rapidly evolving field.\
+
+# Method
+
+## Modeling Process
+Our initial thought-process was that we should start out with a simple or multiple linear regression model. However, we noticed that we were consistently getting very low $R^2$ values that only explained sub 20% of the variance observed in `salary_in_usd`, suggesting that the data is non-linear even after log-transforming the variables. Though the histogram of the residuals showed a nearly symmetrical bell-curve shape, there was a slight right skew. This observation paired with the fact that the data in the QQ-plot of the residuals showed noticeable deviations from the trend line suggested that the residuals did not follow a normal distribution (see appendix). As confirmation that the assumptions to use a linear regression model had not been met, the plot of the residuals against the fitted values showed a cone-line shape expanding along the range of fitted values, showing heteroscedasticity (see Figure 2). Thus, the assumptions to perform linear regression have not been met.\
+
+Models tested:
+```{r, echo = FALSE}
+model1 <- lm((salary_in_usd)~., data=data_no_outliers)
+model2 <- lm(log(salary_in_usd)~., data=data_no_outliers)
+
+cat("R-squared value:", summary(model1)$r.squared, "\n")
+cat("Log-transformed R-squared value:", summary(model2)$r.squared)
+```
+
+As a result, we decided to use a random forest multiple regression model since this is more flexible. For one, the random forest model is a non-parametric model, and it does not require homoscedasticity. Additionally, we are working with a large sample size (over 2000 observations), and each observation is independent of each other. By the nature of the random forest model, we were also less likely to experience over-fitting, and we are also able to use the feature-importance plot in order to better understand which features to focus on in our analysis. Finally, this model is very useful for predicting salaries based on selected features, which is something we would like to take away from our research. Although the log-transformation did slightly increase the RMSE, we believe that a greater model fit is worth the trade-off.\
+
+Model selected:
+```{r}
+#Split data
+set.seed(888)
+trainIndex <- createDataPartition((data_no_outliers$salary_in_usd), p = 0.8, list = FALSE)
+train <- data_no_outliers[trainIndex, ]
+test <- data_no_outliers[-trainIndex, ]
+
+#Random forest model
+model <- randomForest(log(salary_in_usd) ~., data = train, ntree = 500, mtry= 6)
+
+#Predictions
+predictions <- predict(model, test)
+```
+
+```{r, echo = FALSE, message=FALSE}
+# Diagnostics
+varImpPlot(model, main = "Fig 1: Variance Importance Model")
+
+test$salary_in_usd <- log(test$salary_in_usd)
+
+library(patchwork)
+residuals <- test$salary_in_usd - predictions
+p1 <- ggplot(data.frame(Predictions = predictions, Residuals = residuals), 
+             aes(x = Predictions, y = Residuals)) +
+  geom_point() +
+  geom_hline(yintercept = 0, color = "red") +
+  labs(title = "Fig 2: Residuals vs Predicted Salaries", x = "Predicted Salary", y = "Residuals") +
+  theme_minimal()
+
+year = test$work_year
+p2 <- ggplot(data.frame(Actual = test$salary_in_usd, Predicted = predictions), 
+       aes(x = Actual, y = Predicted, color=year)) +
+  geom_point() +
+  geom_abline(slope = 1, intercept = 0, color = "red") +
+  labs(title = "Fig 3: Predicted vs Actual Salaries",
+       x = "Actual Salary", y = "Predicted Salary") +
+  theme_minimal()
+
+gridExtra::grid.arrange(p1, p2, nrow = 2)
+
+#MAE/MSE
+MAE <- mean(abs(predictions - test$salary_in_usd))
+MSE <- mean((predictions - test$salary_in_usd)^2)
+RMSE <- sqrt(MSE)
+
+#R^2
+rss <- sum(residuals^2)
+tss <- sum((test$salary_in_usd - mean(test$salary_in_usd))^2) 
+R2 <- 1 - (rss / tss)
+
+n <- nrow(test)
+p <- ncol(train) - 1
+adj_R2 <- 1 - ((1 - R2) * (n - 1) / (n - p - 1))
+
+cat("MAE:", MAE)
+cat("RMSE:", RMSE)
+cat("R-squared:", R2)
+cat("Adjusted R-squared:", adj_R2)
+```
+
+```{r, echo = FALSE}
+# Calculate the median of the salary in the training dataset
+median_salary <- median(log(train$salary_in_usd))
+
+# Make predictions (predict the median for all test samples)
+median_predictions <- rep(median_salary, length(test$salary_in_usd))
+
+# Evaluate the model's performance (MAE and RMSE)
+mae_median <- mean(abs(median_predictions - test$salary_in_usd))
+rmse_median <- sqrt(mean((median_predictions - test$salary_in_usd)^2))
+
+# Print the results
+cat("MAE for Median Model:", mae_median, "\n")
+cat("RMSE for Median Model:", rmse_median, "\n")
+
+```
+
+Figure 2 shows that the residuals are scattered around 0 showing no clear pattern. However, the variance does seem to increase slightly as the predicted salaries value increases, suggesting that there is some heteroscedasticity. Given that the RMSE is about 10,000 USD greater than the MAE, this suggests that outliers may be playing a significant role in this increased variance, especially around the higher predicited salary values.\
+
+Figure 3 shows that the data points generally follow the trend along the y=x axis. However again, there is there is some deviation from the line especially at higher salary values. This is indicative of the model overestimating salary, especially in the higher salary ranges. The color gradient does not give insightful information regarding the spread of salary by year, but we will be exploring this later on in the report.\
+
+Although the $R^2$ value for the random forest model is considerably low and only explains $`r round(R2*100, digits = 2)`$% of the variability in `salary_in_usd`, the model may still be useful in identifying patterns or trends in the non-linear relationships between predictors and the response variable. While the MAE does yield an error of approximately 40,000 USD, given the wide distribution of factors such as company size, job title, and experience, this is simply the result of unexplained variance.\
+
+If we compared the random forest model to a simple median model, we see that the random forest model outperforms the median model. Our model does capture relevant patterns since the MAE and RMSE of the median model are both greater than that of the random forest model. Note that we chose the use he median model as our baseline since this is a more robust metric than mean. As mentioned earlier, the data follows a skewed distribution and is heteroscedastic, so the assumptions to conduct a linear regression test have not been met.\
+
+Finally, this model helps us take note of key predictor variables (`job_title` and `experience_level`). This is important to note since our research question originally only led us to explore the relationship between `salary_in_usd`, `work_year`, and `job_title`; however, given the importance of the `experience_level` feature, this should be considered in our analysis as well.\
+
+## Visualizations
+
+### Cluster Analysis
+```{r, echo = FALSE}
+# Scale PCA Data
+pca_data <- data_no_outliers[, c("work_year", "remote_ratio", "job_title", "experience_level", "company_size")]
+
+numeric_vars <- c("work_year", "remote_ratio")
+pca_data[numeric_vars] <- scale(pca_data[numeric_vars])
+
+categorical_vars <- c("job_title")
+pca_data <- pca_data %>%
+  mutate(across(all_of(categorical_vars), as.factor))  # Convert to factors before encoding
+
+library(fastDummies)
+pca_data <- dummy_cols(pca_data, select_columns = categorical_vars)
+
+
+pca_data$experience_level <- factor(pca_data$experience_level, 
+                                    levels = c("EN", "MI", "SE", "EX"), 
+                                    ordered = TRUE)
+pca_data$experience_level <- as.numeric(pca_data$experience_level)
+
+pca_data$company_size <- factor(pca_data$company_size, 
+                                levels = c("S", "M", "L"), 
+                                ordered = TRUE)
+pca_data$company_size <- as.numeric(pca_data$company_size)
+
+pca_data <- pca_data %>%
+  select(-("job_title"))
+
+standardized_features <- scale(pca_data)
+
+
+# Perform PCA
+pca_result <- prcomp(standardized_features)
+
+# PC Selection
+par(mfrow = c(1, 2))
+screeplot(pca_result,main="Fig 4: scree plot")
+screeplot(pca_result,type="lines",  main = "Fig 5: pca_result")
+
+summary(pca_result)
+```
+
+```{r, echo = FALSE, message = FALSE}
+# Project the data onto the principal components
+pca_scores <- pca_result$x
+
+# Combine PCA scores with species information
+pca_data <- data.frame(pca_scores, Salaries_USD = data_no_outliers$salary_in_usd)
+
+library(plotly)
+
+# 3D plot using plotly
+plot_ly(data = pca_data, 
+        x = ~PC1, y = ~PC2, z = ~PC3, 
+        color = ~Salaries_USD, 
+        type = "scatter3d", mode = "markers")%>%
+  layout(title = "Fig 6: 3D Scatter Plot of PCA Components",
+         scene = list(xaxis = list(title = 'PC1'),
+                      yaxis = list(title = 'PC2'),
+                      zaxis = list(title = 'PC3')))
+
+```
+
+```{r, echo = FALSE, message = FALSE}
+# Perform clustering using k-means on the first 2 components
+set.seed(123)
+
+# Visualize the clusters in a 3D scatter plot using plotly
+kmeans_result <- kmeans(pca_data[, c("PC1", "PC2", "PC3")], centers = 3, nstart = 25)
+pca_data$Cluster <- as.factor(kmeans_result$cluster)
+
+plot_ly(data = pca_data, 
+        x = ~PC1, y = ~PC2, z = ~PC3, 
+        color = ~Cluster, colors = c('pink', 'purple3', 'lightblue'),
+        type = "scatter3d", mode = "markers") %>%
+  layout(title = "Fig 7: 3D Scatter Plot of PCA Components with K-means Clustering",
+         scene = list(xaxis = list(title = 'PC1'),
+                      yaxis = list(title = 'PC2'),
+                      zaxis = list(title = 'PC3')))
+```
+
+```{r, echo = FALSE}
+# Assuming `kmeans_result` is the output of kmeans()
+data_with_clusters <- data_no_outliers
+data_with_clusters$cluster <- kmeans_result$cluster
+
+# Count job titles by cluster
+cluster_job_summary <- data_with_clusters %>%
+  group_by(cluster, job_title) %>%
+  summarise(count = n(), .groups = "drop")
+
+# Count job titles by cluster
+cluster_job_summary <- table(data_with_clusters$cluster, data_with_clusters$job_title)
+cluster_job_summary_df <- as.data.frame(cluster_job_summary)
+
+ggplot(data_with_clusters, aes(x = cluster, fill = job_title)) +
+  geom_bar() +
+  labs(title = "Fig 8: Distribution of Job Titles by Cluster",
+       x = "Cluster", y = "Count",
+       fill = "Job Title")
+```
+
+```{r, echo = FALSE}
+# Summarize features by cluster
+numeric_summary <- data_with_clusters %>%
+  group_by(cluster) %>%
+  summarise(across(where(is.numeric), list(mean = mean, median = median), .names = "{.col}_{.fn}"))
+
+# Summarize categorical variables (e.g., most frequent value)
+categorical_summary <- data_with_clusters %>%
+  group_by(cluster) %>%
+  summarise(across(where(is.factor)|where(is.character), 
+                   ~ names(sort(table(.), decreasing = TRUE))[1], 
+                   .names = "{.col}_mode"))
+
+# Combine summaries if needed
+cluster_summary <- numeric_summary %>%
+  left_join(categorical_summary, by = "cluster")
+
+knitr::kable(cluster_summary, caption = "Summary Statistics of Cluster Analysis")
+
+# Boxplot of a single feature by cluster
+ggplot(data_with_clusters, aes(x = factor(cluster), y = salary_in_usd, fill = factor(cluster))) +
+  geom_boxplot() +
+  labs(title = "Fig 9: Distribution of Salary by Cluster",
+       x = "Cluster", y = "Salary in USD") +
+  theme_minimal()
+```
+
+### Time Series Analysis
+```{r, echo = FALSE, message = FALSE}
+# Create the Scatterplot
+avg_salary_data <- data_no_outliers %>%
+  group_by(work_year, job_title) %>%
+  summarise(avg_salary = median(salary_in_usd, na.rm = TRUE)) %>%
+  ungroup()
+    
+scatter_plot <- ggplot(avg_salary_data, aes(x = work_year, y = avg_salary, color = job_title)) +
+  geom_line() +  # Adds a line connecting the averages
+  geom_point(size = 3) +  # Adds points at each average value
+  labs(title = "Fig 10: Median Salary by Job Title Over the Years",
+        x = "Work Year", y = "Average Salary in USD") +
+  theme_minimal() +
+  theme(legend.position = "bottom")  # Place the legend at the bottom
+      
+# Create the line plot
+job_title_over_time <- data_no_outliers %>%
+  group_by(work_year, job_title) %>%
+  summarise(count = n()) %>%
+  ungroup()
+    
+line_plot <- ggplot(job_title_over_time, 
+                    aes(x = work_year, y = count,
+                        color = job_title, group = job_title)) +
+  geom_line() +  # Line plot to show trends
+  geom_point(size = 3) +  # Add points at each year
+  labs(title = "Fig 11: Change in Job Titles Over Time",
+        x = "Work Year", y = "Number of Occurrences") +
+  theme_minimal() +
+  theme(legend.position = "bottom")  # Place the legend at the bottom
+
+gridExtra::grid.arrange(scatter_plot, line_plot, nrow = 2)
+```
+
+### Predicting Future Trends
+```{r, echo = FALSE}
+# Boxplot for experience_level vs salary_in_usd
+data_no_outliers$experience_level <- factor(data_no_outliers$experience_level,
+                                                levels = c("EN", "MI", "SE", "EX"))
+ggplot(data_no_outliers, 
+       aes(x = experience_level, y = salary_in_usd, fill = job_title)) +
+  geom_boxplot() +
+  labs(title = "Fig 12: Salary Distribution by Experience Level and Job Title",
+        x = "Experience Level", y = "Salary in USD") +
+  theme_minimal()
+```
+
+```{r, echo = FALSE}
+test$predicted_salary <- predictions
+
+future_data <- data.frame(
+  work_year = 2025,
+  experience_level = rep(c("EN", "MI", "SE", "EX"), times = 2),
+  employment_type = rep ("FT", 8),
+  job_title = rep(c("Machine Learning/AI", "Other"), each = 4),
+  salary_in_usd = rep(NA, 8),
+  employee_residence = rep("US", 8),
+  remote_ratio = rep(0, 8),
+  company_size = rep("M", 8)
+)
+
+# Align factor levels
+future_data$work_year <- as.integer(future_data$work_year)
+future_data$experience_level <- factor(future_data$experience_level, levels = levels(data_no_outliers$experience_level))
+future_data$employment_type <- factor(future_data$employment_type, levels = levels(data_no_outliers$employment_type))
+future_data$salary_in_usd <- as.integer(future_data$salary_in_usd)
+future_data$remote_ratio<- as.integer(future_data$remote_ratio)
+future_data$employee_residence <- factor(future_data$employee_residence, levels = levels(data_no_outliers$employee_residence))
+future_data$company_size <- factor(future_data$company_size, levels = levels(data_no_outliers$company_size))
+
+future_data$salary_in_usd <- NULL
+
+future_data$predicted_salary <- predict(model, newdata = future_data)
+
+knitr::kable(future_data, caption = "Predicted Salary 2025")
+```
+
+```{r, echo = FALSE, message = FALSE}
+long_data <- test %>%
+  pivot_longer(cols = c(salary_in_usd, predicted_salary), 
+               names_to = "type", 
+               values_to = "salary_in_usd") %>%
+  mutate(type = recode(type, 
+                       salary_in_usd = "Actual", 
+                       predicted_salary = "Predicted"))
+future_long_data <- future_data %>%
+  pivot_longer(cols = c(predicted_salary), 
+               names_to = "type", 
+               values_to = "salary_in_usd") %>%
+  mutate(type = "Predicted", work_year = as.factor(future_data$work_year))
+
+final_long_data <- rbind(long_data, future_long_data)
+
+med_data <- final_long_data %>%
+  group_by(work_year, type, job_title) %>%
+  summarize(med_salary = median(salary_in_usd, na.rm = TRUE), .groups = "drop")
+
+ggplot(med_data, aes(x = work_year, y = med_salary, color = job_title, group = interaction(type, job_title))) +
+    geom_line(aes(linetype = type), linewidth = 1) + 
+    geom_point(aes(shape = type), linewidth = 3) +
+    facet_wrap(~type) +
+    labs(title = "Fig. 13: Median Salaries Over Time by Job Title and Type",
+         x = "Year",
+         y = "Salary") +
+    theme_minimal()
+```
+
+## Results
+
+### Cluster Analysis
+Let's start with the cluster analysis. The scree plots in Figures 4 and 5 did not clearly indicate which components to include. We used the cumulative proportions to determine that PC1, PC2, and PC3 explain sufficient variability in the data without excess overlap or complexity. Figures 6 and 7 give us a little more insight regarding the relationship between `salary_in_usd`, and `job_title`. We can see 6 distinct groups of data in Figure 6, with the 2 groups at the highest PC3 value having higher salaries (as indicated by the yellow/green dots). In Figure 7, we can see the same data color-coded by Cluster. The two groups of data that we observed earlier are part of Cluster 1. The other 4 groups of data, which showed no obvious salary difference in Figure 6, have been categorized into 2 distinct clusters.\
+
+The results in Figure 8 were surprising at first glance. Cluster 1, which had the most variability in salary and the highest salary data, consists of both ML and "Other" job types almost equally. This will be looked into as we discuss Table 2. Figure 8 also indicates that Cluster 2 is entirely composed of ML/AI job titles while Cluster 3 is entirely comprised of job titles that fall under the "Other" category.\
+
+Table 2 and Figure 9 give us a more well-rounded explanation of the cluster relationships. Firstly, these figures confirm what Figure 8 portrayed previously: Cluster 2 and 3 are mainly separated based on the `job_title` and `remote_ratio `features since all other features remain constant between the two (besides `salary_in_usd`). Cluster 1 seems to be separated based on the `company_size` and `remote_ratio` features since the most common `company_size` in this cluster is L as compared to M. Another noteworthy observation is that the mean `salary_in_usd` for Clusters 1 and 2 are approximately the same, but median depicts a very clear difference. Additionally, the difference in mean salary vs. median salary in Cluster 1 is the largest among all 3 Clusters, suggesting that outliers play a strong influence in Cluster 1. In context, this actually makes sense since larger companies tend to have a more distinct hierarchy of employees and have more executives than medium-sized companies. This would explain why there are a few extremely high `salary_in_usd` values in Figure 6 (executive pay) even though the median `salary_in_usd` value for Cluster 1 is 15,000 USD lower.\
+
+Figure 9 depicts the distribution of salary by cluster. For the sake of comparison, we chose to focus on the differences between Cluster 2 and Cluster 3. Cluster 2 has the higher median salary. Since Cluster 2 is mostly comprised of ML/AI job titles, we can assume that having an AI-specific job title does tend to result in a higher salary than traditional, or in this case "Other", roles. Thus, this finding supports the second half of our hypothesis.\
+
+### Time Series Analysis
+Next, let's look into the time series plots in Figures 10 and 11. Figure 10 depicts the trends in average salary from 2020 to 2024, separated by job title. Overall, it does look like those who hold job titles in ML/AI have higher average salaries than those who hold more traditional roles. From 2020 to 2021, the average salary of traditional roles increased at a higher rate than ML/AI roles. However, between 2021 to 2023, salary increases at a higher rate for ML/AI job titles than for "Other" job titles. Finally, from 2023 to 2024, the salaries for ML/AI and "Other" jobs decreased at about the same rate.\
+
+In order to understand these differences, we have to consider the impact of external economic factors. 2020 to 2021 was the peak of the Covid-19 pandemic. The salary growth of traditional data science roles could be attributed to increased market demand (need for BI analysts, etc.) and work-from-home options (building lease money goes into salary instead). AI-specific roles might have decreased in salary since this field was relatively new and thus very research-heavy. During a time of uncertainty, sponsoring research or AI start-ups would have been a gamble. From 2021 to 2023, the sudden increase in AI-specific role salaries could be attributed to post-pandemic economic revitalization and stimulation. In 2022, the popularity of generative AI spurring from the release of OpenAI's ChatGPT would have solidified AI/ML roles, making these roles some of the most valued in the industry. But how does this explain the sudden drop from 2023 to 2024? Given that the average salaries of both `job_title` categories decreased at the same rate, this is most likely due to market factors as well. This could be the result of over-hiring in 2020 and 2021, depleted resources, economic recession, or a combination of these factors.\
+
+Given the trends in AI growth and average salaries from 2020 to 2023, we believe that this supports the first half of our hypothesis: AI-specifc roles have higher salaries than traditional roles. However, it is also important to note that the assumptions we have made regarding market behaior have not been thoroughly explored. We would still need to do some external research in terms of the effect of the economy on the AI industry and vice versa.\
+
+The second half of our hypothesis can be answered by Figure 11. Based on the line plot of changes in job titles from 2020 to 2024, while the number of job titles in the industry has generally increased over time (except for 2023 to 2024), it looks like the frequency of AI-specific roles is increasing at approximately the same rate as traditional roles. Note that there are actually slightly fewer AI-specific roles than traditional roles; however, this is expected since ML/AI are relatively new fields in the industry. Based on the results of Figure 11, it is clear that the demand for AI-specific roles has not increased over time as compared to traditional roles.\
+
+### Predicting Future Trends
+This is our main takeaway from the research. The goal of this section is to understand trends in data science salaries in the upcoming year (2025). We chose to forecast only one year ahead since our model did not weigh `work_year` as heavily in terms of importance. Figure 12 is used to emphasize the importance of factoring in `experience level` as an influential predictor variable. For this reason, we decided to keep all other predictors besides `job_title` and `experience_level` constant in the `future_data` data set. Table 3 shows the results of this prediction, and we can see that as expected, the ML/AI job titles have higher salaries than those that hold traditional roles. Additionally, as experience level increases, predicted salary increases as well.\
+
+Figure 13 is key to understanding how the 2025 predictions compare to the rest of the data. We have two facets comparing the actual salary and the predicted salary based on the `job_title` and `work_year` predictor variables. For sake of simplification, we did not include the `experience_level` predictor variable in this analysis and instead took the median salary of each year. The patterns for the actual and predicted type plots are very similar, with the same sharp incline from 2020 to 2021 similar variations from 2021 onward. We can assume that the differences in the actual "Other" salaries vs. the predicted "Other" salaries trends are due to errors within the model we used, especially considering that our MAE was about 40,000 USD.\
+
+Based on the findings, salaries for both traditional roles and AI-specific roles are expected to decrease. However, it is important to take these predictions with a grain of salt. As mentioned in the time series analysis section, this model does not account for external market factors such as resource shortages.
+
+# Conclusion & Recommendations
+Back to our initial question: has the growth of AI influenced job titles and salary trends in the data science field? The answer is both yes and no. Our initial hypothesis was only partially correct in that AI-specific roles tend to earn a higher salary than traditional (or "Other") roles. However, by Figure 11, it does not appear as if the demand for AI-specific roles has increased more significantly than the demand for traditional data science roles. This was a surprising revelation considering the recent boom in the AI industry.\
+
+At the end of the day, AI/ML is relatively new field within a relatively new industry. It is understandable why one may feel hesitant about hiring a new data scientist or ML engineer since "new" means unpredictable. In this economy, making just one extra expenditure bring disaster to a business. However, even though the demand for AI-specific jobs may not be increasing right now, that does not mean they never will. We recommend that those seeking to pursue a career in data science *and* prefer higher salaries aim for job titles with words like "ML", "AI", or even "Scientist" as compared to "Analyst" or "BI." However, experience plays a significant role in salary as well, so staying in the industry for several years will be beneficial.
+
+In order to conduct further research on this topic, it is important to account for external factors such as inflation, the pandemic, and market trends. Events such as hiring freezes/over-hiring and recession can cause unexpected fluctuations in the data. Additionally, we would like to gather more data on salary trends before 2022 since our data for 2020 and 2021 was already limited. Additionally, understanding what the industry and economy were like pre-pandemic may aid in creating a more efficient model, especially if the economy was more stable then than it is currently.\
+
+# Appendix
+
+### Check for Normality
+```{r, echo = FALSE}
+p1 <- hist(model2$residuals, main = "Histogram of Residuals")
+
+p2 <- qqnorm(model2$residuals, main = "QQ Plot of Residuals")
+qqline(model2$residuals, col = "red")
+```
+
+
+### Citations
+GeeksforGeeks. (2024, October 30). Top career paths in machine learning. GeeksforGeeks. Retrieved December 2, 2024, from [https://www.geeksforgeeks.org/top-career-paths-in-machine-learning/](https://www.geeksforgeeks.org/top-career-paths-in-machine-learning/)\
+
+Delikkaya, Y. (2024). Data science salaries 2024 [Dataset]. Kaggle. Retrieved December 2, 2024, from [https://www.kaggle.com/datasets/yusufdelikkaya/datascience-salaries-2024](https://www.kaggle.com/datasets/yusufdelikkaya/datascience-salaries-2024)
